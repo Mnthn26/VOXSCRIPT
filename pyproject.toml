@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxscript"
+version = "0.1.0"
+description = "Offline voice transcription (faster-whisper) and AI summaries (Ollama) in the terminal"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { file = "LICENSE" }
+dependencies = [
+    "faster-whisper>=1.0.3",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26",
+    "requests>=2.31",
+    "rich>=13.7",
+]
+
+[project.scripts]
+voxscript = "voxscript.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["voxscript*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

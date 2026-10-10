@@ -1,0 +1,9 @@
+# Core runtime
+faster-whisper>=1.0.3
+sounddevice>=0.4.6
+numpy>=1.26
+requests>=2.31
+rich>=13.7
+
+# Development / tests
+pytest>=8.0
