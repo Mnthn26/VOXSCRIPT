@@ -4,6 +4,7 @@ sounddevice>=0.4.6
 numpy>=1.26
 requests>=2.31
 rich>=13.7
+pynput>=1.7.6         # global hotkey (X11 / XWayland)
 
 # Development / tests
 pytest>=8.0

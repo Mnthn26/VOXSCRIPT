@@ -15,10 +15,13 @@ dependencies = [
     "numpy>=1.26",
     "requests>=2.31",
     "rich>=13.7",
+    "pynput>=1.7.6",
 ]
 
 [project.scripts]
 voxscript = "voxscript.cli:main"
+voxscript-daemon = "voxscript.dictate.daemon:main"
+voxscript-ctl = "voxscript.dictate.ctl:main"
 
 [tool.setuptools.packages.find]
 include = ["voxscript*"]

@@ -1,0 +1,28 @@
+# systemd USER service for the VOXSCRIPT dictation daemon.
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/voxscript-dictate.service ~/.config/systemd/user/
+#   # edit ExecStart below if your venv is somewhere else
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now voxscript-dictate.service
+
+[Unit]
+Description=VOXSCRIPT universal dictation daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/VOXSCRIPT
+ExecStart=%h/VOXSCRIPT/.venv/bin/voxscript-daemon --log-level INFO
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+# Optional: override defaults without editing this file, e.g.
+#   systemctl --user edit voxscript-dictate   then add:
+#   [Service]
+#   ExecStart=
+#   ExecStart=%h/VOXSCRIPT/.venv/bin/voxscript-daemon --whisper-model small.en --paste-combo ctrl+shift+v
+
+[Install]
+WantedBy=graphical-session.target

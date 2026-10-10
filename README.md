@@ -24,8 +24,11 @@ voxscript/
   report.py       Markdown/JSON report generation
   ui.py           rich rendering helpers
   streaming.py    real-time VAD + incremental transcription + live view
+  dictate/        system-wide daemon: controller, hotkey, injector, control socket, voxscript-ctl
+deploy/           systemd user service
 tests/test_core.py
 tests/test_streaming.py
+tests/test_dictate.py
 ```
 
 ## System dependencies
@@ -112,6 +115,87 @@ voxscript --live --output notes.md
 Speak naturally. Text appears in the terminal as you talk. Italic text is provisional and is replaced once a pause closes the phrase. Press ENTER or Ctrl+C to stop. The full transcript is then sent to Ollama, and the report and the full recording (`./recordings/`) are saved.
 
 Tuning: `--silence-ms` (pause that ends a phrase, default 600), `--partial-interval` (live refresh, default 1.0 s), `--vad-threshold` (raise it in noisy rooms), `--max-utterance` (forced phrase split, default 15 s). For faster live updates on CPU, try `--whisper-model tiny.en`.
+
+## Universal dictation daemon (system-wide)
+
+`voxscript-daemon` runs in the background. Press a hotkey, speak, press it again, and the transcribed text is copied to the clipboard and pasted into whichever window has focus.
+
+```bash
+voxscript-daemon --check          # shows which tools are installed and what to install
+voxscript-daemon                  # run in the foreground to see the logs
+voxscript-ctl toggle              # start or stop dictation from any terminal
+voxscript-ctl status              # idle | recording | busy
+```
+
+### Which trigger works where
+
+| Session | Global hotkey (`pynput`, `--hotkey`) | Compositor binding -> `voxscript-ctl toggle` |
+|---|---|---|
+| X11 (i3, Xfce, ...) | yes | yes |
+| Wayland, X11 apps (XWayland) | yes, only while an X app is focused | yes |
+| Wayland, native apps (Hyprland, GNOME, KDE) | no, the compositor hides keys from `pynput` | **yes, use this** |
+
+On Wayland, bind a compositor shortcut to `voxscript-ctl toggle`. Examples:
+
+```conf
+# Hyprland (~/.config/hypr/hyprland.conf)
+bind = SUPER, D, exec, /home/YOU/VOXSCRIPT/.venv/bin/voxscript-ctl toggle
+# GNOME: Settings -> Keyboard -> Custom Shortcuts -> command: /home/YOU/VOXSCRIPT/.venv/bin/voxscript-ctl toggle
+```
+
+Ctrl+Space is the default hotkey as requested, but in some apps it also types a character or switches the input method. Try `--hotkey "ctrl+alt+d"` if that happens.
+
+### Arch Linux packages for injection
+
+X11:
+```bash
+sudo pacman -S --needed xdotool xclip libnotify
+```
+
+Wayland (Hyprland, GNOME, KDE, Sway):
+```bash
+sudo pacman -S --needed wl-clipboard ydotool libnotify
+
+# ydotool writes to /dev/uinput, so your user needs access to it
+sudo usermod -aG input "$USER"
+echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/60-uinput.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo modprobe uinput
+
+# Start the ydotool daemon. If your system has a user unit for it, use that:
+systemctl --user list-unit-files | grep -i ydotool
+systemctl --user enable --now ydotool.service   # only if the unit above exists
+# otherwise run `ydotoold &` in your session startup, e.g. Hyprland exec-once
+```
+
+Log out and back in after changing group membership.
+
+### Run as a background service
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/voxscript-dictate.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now voxscript-dictate.service
+
+journalctl --user -u voxscript-dictate -f     # live logs: LISTENING, TRANSCRIBING, INJECTING
+systemctl --user restart voxscript-dictate    # after an update
+```
+
+The user service needs the display variables. On Hyprland, add this to your config:
+```conf
+exec-once = dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
+```
+On GNOME and KDE, the session manager already provides them.
+
+### Tuning
+
+- `--whisper-model tiny.en` or `base.en` for the fastest response. `small.en` is more accurate on a GPU or a fast CPU.
+- `--paste-combo ctrl+shift+v` for terminal emulators.
+- `--inject-mode type` types characters directly instead of using the clipboard, which is slower but does not touch the clipboard.
+- `--max-seconds 120` stops a forgotten recording automatically.
+
+Privacy: the daemon logs a preview of each transcription, and it only opens the microphone while you are recording.
 
 ## Tests
 
