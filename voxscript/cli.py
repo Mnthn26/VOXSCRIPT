@@ -1,4 +1,4 @@
-"""Command-line entry point: record or load audio, transcribe, summarize, and export."""
+"""Command-line entry point: live-stream, record, or load audio; transcribe; summarize; export."""
 
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ from voxscript import ui
 from voxscript.audio import AudioError, EnterKeyWatcher, Recorder, list_input_devices, resolve_device
 from voxscript.config import Settings
 from voxscript.report import build_report, write_output
+from voxscript.streaming import LiveSession, StreamConfig
 from voxscript.summarizer import OllamaClient, SummarizerError
-from voxscript.transcriber import Transcriber, TranscriptionError
+from voxscript.transcriber import Transcriber, Transcript, TranscriptionError
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -27,9 +28,10 @@ EXIT_CANCELLED = 130
 def build_parser(settings: Settings) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="voxscript",
-        description="Record or transcribe audio offline with faster-whisper, then summarize with Ollama.",
+        description="Transcribe speech offline with faster-whisper, then summarize with Ollama.",
         epilog=(
             "examples:\n"
+            "  voxscript --live --output notes.md\n"
             "  voxscript --record --output notes.md\n"
             "  voxscript --file meeting.mp3 --output meeting.json\n"
             "  voxscript --file memo.wav --no-summary\n"
@@ -38,24 +40,49 @@ def build_parser(settings: Settings) -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     src = p.add_mutually_exclusive_group()
-    src.add_argument("-r", "--record", action="store_true", help="record from the microphone (ENTER starts/stops)")
-    src.add_argument("-f", "--file", metavar="PATH", help="transcribe an existing audio file (wav, mp3, m4a, flac, ...)")
+    src.add_argument("-l", "--live", action="store_true",
+                     help="real-time streaming transcription; text appears as you speak (ENTER or Ctrl+C to stop)")
+    src.add_argument("-r", "--record", action="store_true",
+                     help="record from the microphone first (ENTER starts/stops), then transcribe")
+    src.add_argument("-f", "--file", metavar="PATH",
+                     help="transcribe an existing audio file (wav, mp3, m4a, flac, ...)")
     src.add_argument("--list-devices", action="store_true", help="list microphone input devices and exit")
 
-    p.add_argument("-o", "--output", metavar="PATH", help="write report to PATH (.md/.txt = Markdown, .json = JSON)")
-    p.add_argument("--audio-out", metavar="PATH", help="where to save recordings (default: ./recordings/<timestamp>.wav)")
-    p.add_argument("--max-seconds", type=float, default=0, metavar="N", help="auto-stop recording after N seconds (0 = manual stop)")
-    p.add_argument("--mic", metavar="DEVICE", help="input device index or name substring (see --list-devices)")
+    p.add_argument("-o", "--output", metavar="PATH",
+                   help="write report to PATH (.md/.txt = Markdown, .json = JSON)")
+    p.add_argument("--audio-out", metavar="PATH",
+                   help="where to save recordings (default: ./recordings/<timestamp>.wav)")
+    p.add_argument("--max-seconds", type=float, default=0, metavar="N",
+                   help="auto-stop after N seconds (0 = manual stop)")
+    p.add_argument("--mic", metavar="DEVICE",
+                   help="input device index or name substring (see --list-devices)")
 
-    p.add_argument("--whisper-model", default=settings.whisper_model, help="faster-whisper model size or path (default: %(default)s)")
-    p.add_argument("--whisper-device", default=settings.whisper_device, choices=["cpu", "cuda", "auto"], help="inference device (default: %(default)s)")
-    p.add_argument("--compute-type", default=settings.whisper_compute_type, help="CTranslate2 compute type, e.g. int8, float16 (default: %(default)s)")
-    p.add_argument("--language", default=None, metavar="CODE", help="spoken language code, e.g. en (default: auto-detect)")
+    p.add_argument("--whisper-model", default=settings.whisper_model,
+                   help="faster-whisper model size or path (default: %(default)s)")
+    p.add_argument("--whisper-device", default=settings.whisper_device, choices=["cpu", "cuda", "auto"],
+                   help="inference device (default: %(default)s)")
+    p.add_argument("--compute-type", default=settings.whisper_compute_type,
+                   help="CTranslate2 compute type, e.g. int8, float16 (default: %(default)s)")
+    p.add_argument("--language", default=None, metavar="CODE",
+                   help="spoken language code, e.g. en (default: auto-detect; English for *.en models)")
+
+    live = p.add_argument_group("live streaming options (--live)")
+    live.add_argument("--vad-threshold", type=float, default=0.015, metavar="RMS",
+                      help="speech energy threshold, 0-1; raise it in noisy rooms (default: %(default)s)")
+    live.add_argument("--silence-ms", type=int, default=600, metavar="MS",
+                      help="pause length that ends a phrase (default: %(default)s)")
+    live.add_argument("--partial-interval", type=float, default=1.0, metavar="SEC",
+                      help="how often the live line is refreshed (default: %(default)s)")
+    live.add_argument("--max-utterance", type=float, default=15.0, metavar="SEC",
+                      help="force a phrase boundary after SEC seconds of speech (default: %(default)s)")
 
     p.add_argument("--no-summary", action="store_true", help="skip the Ollama summarization step")
-    p.add_argument("--ollama-host", default=settings.ollama_host, help="Ollama base URL (default: %(default)s)")
-    p.add_argument("--ollama-model", default=settings.ollama_model, help="Ollama model name (default: %(default)s)")
-    p.add_argument("--timeout", type=float, default=settings.ollama_timeout, metavar="SEC", help="Ollama request timeout (default: %(default)s)")
+    p.add_argument("--ollama-host", default=settings.ollama_host,
+                   help="Ollama base URL (default: %(default)s)")
+    p.add_argument("--ollama-model", default=settings.ollama_model,
+                   help="Ollama model name (default: %(default)s)")
+    p.add_argument("--timeout", type=float, default=settings.ollama_timeout, metavar="SEC",
+                   help="Ollama request timeout (default: %(default)s)")
     return p
 
 
@@ -94,33 +121,21 @@ def record_interactively(settings: Settings, device: int | None, max_seconds: fl
     return path
 
 
-def run(args: argparse.Namespace, settings: Settings) -> int:
-    # 1. Obtain audio: either record it or use the given file.
-    if args.record:
-        device = resolve_device(args.mic)
-        audio_out = Path(args.audio_out) if args.audio_out else Path("recordings") / f"recording-{datetime.now():%Y%m%d-%H%M%S}.wav"
-        audio_path = record_interactively(settings, device, args.max_seconds, audio_out)
-        source = "microphone"
-    else:
-        audio_path = Path(args.file).expanduser()
-        if not audio_path.is_file():
-            ui.error(f"File not found: {audio_path}")
-            return EXIT_ERROR
-        source = str(audio_path)
+def _audio_path(args: argparse.Namespace) -> Path:
+    if args.audio_out:
+        return Path(args.audio_out)
+    return Path("recordings") / f"recording-{datetime.now():%Y%m%d-%H%M%S}.wav"
 
-    # 2. Transcribe locally.
-    settings.whisper_model = args.whisper_model
-    settings.whisper_device = args.whisper_device
-    settings.whisper_compute_type = args.compute_type
-    transcriber = Transcriber(settings)
-    with ui.console.status(f"[cyan]Transcribing with faster-whisper ({settings.whisper_model})...[/]", spinner="dots"):
-        transcript = transcriber.transcribe(audio_path, language=args.language)
+
+def _finish(args: argparse.Namespace, settings: Settings, transcript: Transcript,
+            source: str, show_table: bool) -> int:
+    """Shared tail for every mode: show results, summarize with Ollama, export the report."""
     if not transcript.text:
         ui.warn("No speech detected in the audio.")
-    else:
+    elif show_table:
         ui.show_transcript(transcript)
 
-    # 3. Summarize with Ollama (non-fatal: the transcript is still saved on failure).
+    # Summarize with Ollama. A failure is non-fatal: the transcript is still saved.
     summary: str | None = None
     if not args.no_summary and transcript.text:
         settings.ollama_host = args.ollama_host
@@ -135,7 +150,6 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         except SummarizerError as exc:
             ui.warn(f"Summary skipped: {exc}")
 
-    # 4. Export.
     if args.output:
         out = Path(args.output).expanduser()
         models = {
@@ -146,6 +160,46 @@ def run(args: argparse.Namespace, settings: Settings) -> int:
         write_output(out, report, transcript)
         ui.success(f"Report written to [bold]{out}[/]")
     return EXIT_OK
+
+
+def run(args: argparse.Namespace, settings: Settings) -> int:
+    settings.whisper_model = args.whisper_model
+    settings.whisper_device = args.whisper_device
+    settings.whisper_compute_type = args.compute_type
+    transcriber = Transcriber(settings)
+
+    if args.live:
+        cfg = StreamConfig(
+            vad_threshold=args.vad_threshold,
+            silence_ms=args.silence_ms,
+            partial_interval_s=args.partial_interval,
+            max_utterance_s=args.max_utterance,
+        )
+        session = LiveSession(
+            settings=settings,
+            cfg=cfg,
+            transcriber=transcriber,
+            device=resolve_device(args.mic),
+            language=args.language,
+            audio_out=_audio_path(args),
+            max_seconds=args.max_seconds,
+        )
+        transcript = session.run()
+        return _finish(args, settings, transcript, source="live microphone", show_table=False)
+
+    if args.record:
+        audio_path = record_interactively(settings, resolve_device(args.mic), args.max_seconds, _audio_path(args))
+        source = "microphone"
+    else:
+        audio_path = Path(args.file).expanduser()
+        if not audio_path.is_file():
+            ui.error(f"File not found: {audio_path}")
+            return EXIT_ERROR
+        source = str(audio_path)
+
+    with ui.console.status(f"[cyan]Transcribing with faster-whisper ({settings.whisper_model})...[/]", spinner="dots"):
+        transcript = transcriber.transcribe(audio_path, language=args.language)
+    return _finish(args, settings, transcript, source=source, show_table=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -160,8 +214,8 @@ def main(argv: list[str] | None = None) -> int:
             ui.error(str(exc))
             return EXIT_ERROR
         return EXIT_OK
-    if not (args.record or args.file):
-        parser.error("choose an input: --record or --file PATH")
+    if not (args.live or args.record or args.file):
+        parser.error("choose an input: --live, --record, or --file PATH")
 
     ui.banner()
     try:

@@ -23,7 +23,9 @@ voxscript/
   summarizer.py   Ollama client and chunking
   report.py       Markdown/JSON report generation
   ui.py           rich rendering helpers
+  streaming.py    real-time VAD + incremental transcription + live view
 tests/test_core.py
+tests/test_streaming.py
 ```
 
 ## System dependencies
@@ -100,6 +102,16 @@ Environment variables (optional): `VOXSCRIPT_WHISPER_MODEL`, `VOXSCRIPT_WHISPER_
 `VOXSCRIPT_COMPUTE_TYPE`, `VOXSCRIPT_MODEL_DIR`, `VOXSCRIPT_OLLAMA_MODEL`, `OLLAMA_HOST`.
 
 Exit codes: `0` success, `1` runtime error, `2` usage error, `130` cancelled with Ctrl+C.
+
+## Live streaming
+
+```bash
+voxscript --live --output notes.md
+```
+
+Speak naturally. Text appears in the terminal as you talk. Italic text is provisional and is replaced once a pause closes the phrase. Press ENTER or Ctrl+C to stop. The full transcript is then sent to Ollama, and the report and the full recording (`./recordings/`) are saved.
+
+Tuning: `--silence-ms` (pause that ends a phrase, default 600), `--partial-interval` (live refresh, default 1.0 s), `--vad-threshold` (raise it in noisy rooms), `--max-utterance` (forced phrase split, default 15 s). For faster live updates on CPU, try `--whisper-model tiny.en`.
 
 ## Tests
 

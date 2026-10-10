@@ -5,11 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from voxscript.config import Settings
 
 
 class TranscriptionError(RuntimeError):
-    """Raised when the audio file cannot be transcribed."""
+    """Raised when audio cannot be transcribed."""
 
 
 @dataclass
@@ -43,13 +45,14 @@ def fmt_time(seconds: float) -> str:
 
 
 class Transcriber:
-    """Lazily loads a faster-whisper model and transcribes audio files."""
+    """Lazily loads a faster-whisper model and transcribes files or in-memory audio."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._model = None
 
-    def _load(self):  # noqa: ANN202
+    def load(self):  # noqa: ANN201
+        """Load the model once. Safe to call repeatedly."""
         if self._model is None:
             try:
                 from faster_whisper import WhisperModel
@@ -70,9 +73,10 @@ class Transcriber:
         return self._model
 
     def transcribe(self, audio_path: Path, language: str | None = None, vad: bool = True) -> Transcript:
+        """Transcribe an audio file (any format PyAV can decode)."""
         if not audio_path.is_file():
             raise TranscriptionError(f"Audio file not found: {audio_path}")
-        model = self._load()
+        model = self.load()
         try:
             segments, info = model.transcribe(
                 str(audio_path),
@@ -80,7 +84,7 @@ class Transcriber:
                 beam_size=5,
                 vad_filter=vad,  # skip silence; reduces hallucinations on quiet audio
             )
-            result = Transcript(
+            return Transcript(
                 segments=[Segment(s.start, s.end, s.text) for s in segments],  # generator is consumed here
                 language=info.language,
                 language_probability=info.language_probability,
@@ -88,4 +92,27 @@ class Transcriber:
             )
         except Exception as exc:
             raise TranscriptionError(f"Transcription failed for {audio_path}: {exc}") from exc
-        return result
+
+    def transcribe_samples(
+        self,
+        samples: np.ndarray,
+        language: str | None = None,
+        beam_size: int = 5,
+        vad: bool = True,
+    ) -> tuple[list[Segment], str, float]:
+        """Transcribe float32 mono 16 kHz samples in memory.
+
+        Returns (segments with times relative to the samples, detected language, probability).
+        """
+        model = self.load()
+        try:
+            segments, info = model.transcribe(
+                samples,
+                language=language,
+                beam_size=beam_size,
+                vad_filter=vad,
+                condition_on_previous_text=False,  # each chunk stands alone; avoids repetition loops
+            )
+            return [Segment(s.start, s.end, s.text) for s in segments], info.language, info.language_probability
+        except Exception as exc:
+            raise TranscriptionError(f"Transcription failed: {exc}") from exc

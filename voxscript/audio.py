@@ -1,4 +1,4 @@
-"""Microphone capture: interactive start/stop recording and WAV output."""
+"""Microphone capture: interactive start/stop recording, WAV output, and shared audio helpers."""
 
 from __future__ import annotations
 
@@ -18,9 +18,21 @@ class AudioError(RuntimeError):
     """Raised when audio hardware or capture fails."""
 
 
+def load_sounddevice():  # noqa: ANN201
+    """Import sounddevice lazily so the rest of the app works without PortAudio."""
+    try:
+        import sounddevice as sd
+    except OSError as exc:
+        raise AudioError(
+            "PortAudio library not found. Install it with 'sudo pacman -S portaudio' "
+            "(Arch) or 'sudo apt install libportaudio2' (Debian/Ubuntu)."
+        ) from exc
+    return sd
+
+
 def list_input_devices() -> list[tuple[int, str]]:
     """Return (index, name) for every device that can record audio."""
-    sd = _sounddevice()
+    sd = load_sounddevice()
     try:
         devices = sd.query_devices()
     except Exception as exc:  # PortAudio missing or no audio backend
@@ -40,16 +52,16 @@ def resolve_device(device: str | None) -> int | None:
     return matches[0]
 
 
-def _sounddevice():  # noqa: ANN202
-    """Import sounddevice lazily so the rest of the app works without PortAudio."""
-    try:
-        import sounddevice as sd
-    except OSError as exc:
-        raise AudioError(
-            "PortAudio library not found. Install it with 'sudo pacman -S portaudio' "
-            "(Arch) or 'sudo apt install libportaudio2' (Debian/Ubuntu)."
-        ) from exc
-    return sd
+def write_wav(path: Path, samples: np.ndarray, sample_rate: int) -> Path:
+    """Write int16 mono samples to a WAV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.asarray(samples, dtype=np.int16).reshape(-1)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)  # int16
+        wav.setframerate(sample_rate)
+        wav.writeframes(data.tobytes())
+    return path
 
 
 class Recorder:
@@ -66,7 +78,7 @@ class Recorder:
         self._queue.put(indata.copy())
 
     def start(self) -> None:
-        sd = _sounddevice()
+        sd = load_sounddevice()
         try:
             self._stream = sd.InputStream(
                 samplerate=self._settings.sample_rate,
@@ -78,7 +90,7 @@ class Recorder:
             self._stream.start()
         except Exception as exc:
             raise AudioError(
-                f"Could not open microphone: {exc}. Check --device and that your user is in the 'audio' group."
+                f"Could not open microphone: {exc}. Check --mic and that your user is in the 'audio' group."
             ) from exc
         self.started_at = time.monotonic()
 
@@ -99,16 +111,9 @@ class Recorder:
         if not chunks:
             raise AudioError("No audio was captured.")
 
-        samples = np.concatenate(chunks).reshape(-1)
         if output_path is None:
             output_path = Path(f"recording-{datetime.now():%Y%m%d-%H%M%S}.wav")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with wave.open(str(output_path), "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)  # int16
-            wav.setframerate(self._settings.sample_rate)
-            wav.writeframes(samples.tobytes())
-        return output_path
+        return write_wav(output_path, np.concatenate(chunks), self._settings.sample_rate)
 
 
 class EnterKeyWatcher:
